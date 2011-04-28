@@ -51,28 +51,37 @@ do_connected(int fd, short event, void *arg)
 	struct event *evt_connected = arg;
 	free(evt_connected);
 
-	if (event == EV_TIMEOUT) {
+	if (event & EV_TIMEOUT) {
 		fprintf(stderr, "Timeout connect\n");
 		return;
 	}
+
+	int error;
+	socklen_t len = sizeof(error);
+	int rc = getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len);
+	if (rc) {
+		perror("getsockopt");
+		return;
+	}
+
+	if (error) {
+		fprintf(stderr, "connect failed\n");
+		return;
+	}
+
 
 	fprintf(stdout, "Connected\n");
 
 	struct event *evt_read = malloc(sizeof(struct event));
 	if (!evt_read) {
 		fprintf(stderr, "malloc evt_read\n");
-		goto fail;
+		return;
 	}
 
-	event_set(evt_read, fd, EV_READ, do_read, evt_read);
+	event_set(evt_read, fd, EV_WRITE, do_read, evt_read);
 	event_add(evt_read, &timeout_read);
 
 	return;
-
-fail:
-	if (evt_read) {
-		free(evt_read);
-	}
 }
 
 static void
@@ -80,7 +89,7 @@ do_read(int fd, short event, void *arg)
 {
 	struct event *evt_read = arg;
 
-	if (event == EV_TIMEOUT) {
+	if (event & EV_TIMEOUT) {
 		fprintf(stderr, "Timeout read\n");
 		goto fail;
 	}
@@ -90,9 +99,13 @@ do_read(int fd, short event, void *arg)
 	size_t nread;
 	ssize_t err;
 	for (nread = 0; nread < expected; nread += err) {
-		err = read(fd, buf + nread, expected - nread);
+		err = recv(fd, buf + nread, expected - nread, 0);
 		if (err == 0) {
+			fprintf(stderr, "Remote shut down\n");
+			goto fail;
 		} else if (err < 0) {
+			perror("recv");
+			goto fail;
 		}
 	}
 
@@ -124,7 +137,7 @@ do_write(int fd, short event, void *arg)
 {
 	struct event *evt_write = arg;
 
-	if (event == EV_TIMEOUT) {
+	if (event & EV_TIMEOUT) {
 		fprintf(stderr, "Timeout write\n");
 		goto fail;
 	}
@@ -136,9 +149,13 @@ do_write(int fd, short event, void *arg)
 	size_t nwritten;
 	ssize_t err;
 	for (nwritten = 0; nwritten < expected; nwritten += err) {
-		err = write(fd, buf + nwritten, expected - nwritten);
+		err = send(fd, buf + nwritten, expected - nwritten, 0);
 		if (err == 0) {
+			fprintf(stderr, "Remote shut down\n");
+			goto fail;
 		} else if (err < 0) {
+			perror("write");
+			goto fail;
 		}
 	}
 
@@ -171,13 +188,20 @@ main(int argc, char *argv[])
 	event_init();
 
 	struct addrinfo hints, *res;
-	memset(&hints, 0, sizeof hints);
+	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = 0;
+	hints.ai_protocol = 0;
 
 	int rc = getaddrinfo(argv[1], argv[2], &hints, &res);
 	if (rc != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rc));
+		exit(EXIT_FAILURE);
+	}
+
+	if (!res) {
+		fprintf(stderr, "getaddrinfo results null\n");
 		exit(EXIT_FAILURE);
 	}
 
@@ -201,13 +225,15 @@ main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
+	freeaddrinfo(res);
+
 	struct event *evt_connected = malloc(sizeof(struct event));
 	if (!evt_connected) {
 		fprintf(stderr, "malloc\n");
 		exit(EXIT_FAILURE);
 	}
 
-	event_set(evt_connected, sockfd, EV_READ, do_connected, evt_connected);
+	event_set(evt_connected, sockfd, EV_WRITE, do_connected, evt_connected);
 	event_add(evt_connected, &timeout_connected);
 
 	event_dispatch();
