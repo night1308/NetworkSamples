@@ -43,7 +43,7 @@ static struct timeval timeout_write = {
 #define MAX_BUF_SIZE			1024
 
 static uint32_t buf[MAX_BUF_SIZE];
-static size_t expected;
+static size_t expected = 1;
 
 static void
 do_connected(int fd, short event, void *arg)
@@ -94,16 +94,23 @@ do_read(int fd, short event, void *arg)
 		goto fail;
 	}
 
-	fprintf(stdout, "Read\n");
+	fprintf(stdout, "Read: %lu\n", expected);
+
+	memset(buf, 0, expected);
 
 	size_t nread;
 	ssize_t err;
-	for (nread = 0; nread < expected; nread += err) {
-		err = recv(fd, buf + nread, expected - nread, 0);
+	size_t expected_bytes = expected * sizeof(uint32_t);
+	for (nread = 0; nread < expected_bytes; nread += err) {
+		err = recv(fd, buf + nread, expected_bytes - nread, 0);
 		if (err == 0) {
 			fprintf(stderr, "Remote shut down\n");
 			goto fail;
 		} else if (err < 0) {
+			if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+				event_add(evt_read, &timeout_read);
+				return;
+			}
 			perror("recv");
 			goto fail;
 		}
@@ -117,7 +124,10 @@ do_read(int fd, short event, void *arg)
 		}
 	}
 
-	expected = ((expected + 1) % MAX_BUF_SIZE) + 1;
+	expected = ((expected + 1) % MAX_BUF_SIZE);
+	if (expected == 0) {
+		expected = 1;
+	}
 
 	struct event *evt_write = malloc(sizeof(struct event));
 	if (!evt_write) {
@@ -142,14 +152,15 @@ do_write(int fd, short event, void *arg)
 		goto fail;
 	}
 
-	fprintf(stdout, "Write\n");
+	fprintf(stdout, "Write: %lu\n", expected);
 
 	buf[expected - 1] = expected - 1;
 
 	size_t nwritten;
 	ssize_t err;
-	for (nwritten = 0; nwritten < expected; nwritten += err) {
-		err = send(fd, buf + nwritten, expected - nwritten, 0);
+	size_t expected_bytes = expected * sizeof(uint32_t);
+	for (nwritten = 0; nwritten < expected_bytes; nwritten += err) {
+		err = send(fd, buf + nwritten, expected_bytes - nwritten, 0);
 		if (err == 0) {
 			fprintf(stderr, "Remote shut down\n");
 			goto fail;
@@ -159,7 +170,10 @@ do_write(int fd, short event, void *arg)
 		}
 	}
 
-	expected = ((expected + 1) % MAX_BUF_SIZE) + 1;
+	expected = ((expected + 1) % MAX_BUF_SIZE);
+	if (expected == 0) {
+		expected = 1;
+	}
 
 	struct event *evt_read = malloc(sizeof(struct event));
 	if (!evt_read) {
@@ -182,7 +196,6 @@ main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	expected = 1;
 	buf[expected - 1] = expected - 1;
 
 	event_init();
