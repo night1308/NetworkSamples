@@ -78,7 +78,7 @@ do_connected(int fd, short event, void *arg)
 		return;
 	}
 
-	event_set(evt_read, fd, EV_WRITE, do_read, evt_read);
+	event_set(evt_read, fd, EV_READ, do_read, evt_read);
 	event_add(evt_read, &timeout_read);
 
 	return;
