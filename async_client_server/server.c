@@ -45,8 +45,12 @@ static struct timeval timeout_write = {
 
 #define MAX_BUF_SIZE			1024
 
-static uint32_t buf[MAX_BUF_SIZE];
-static size_t expected = 1;
+struct context
+{
+	struct event evt;
+	size_t expected;
+	uint32_t buf[MAX_BUF_SIZE];
+};
 
 static void
 do_accepted(int fd, short event, void *arg)
@@ -80,36 +84,38 @@ do_accepted(int fd, short event, void *arg)
 					remote_port_str);
 		}
 
-		struct event *evt_write = malloc(sizeof(struct event));
-		if (!evt_write) {
-			fprintf(stderr, "malloc evt_write\n");
+		struct context *ctxt = malloc(sizeof(struct context));
+		if (!ctxt) {
+			fprintf(stderr, "malloc context\n");
 			return;
 		}
 
-		event_set(evt_write, clientfd, EV_WRITE, do_write, evt_write);
-		event_add(evt_write, &timeout_write);
+		ctxt->expected = 1;
+		ctxt->buf[ctxt->expected - 1] = ctxt->expected - 1;
+		event_set(&ctxt->evt, clientfd, EV_WRITE, do_write, ctxt);
+		event_add(&ctxt->evt, &timeout_write);
 	}
 }
 
 static void
 do_write(int fd, short event, void *arg)
 {
-	struct event *evt_write = arg;
+	struct context *ctxt = arg;
 
 	if (event == EV_TIMEOUT) {
 		fprintf(stderr, "Timeout write\n");
 		goto fail;
 	}
 
-	fprintf(stdout, "Write: %lu\n", expected);
+	fprintf(stdout, "Write: %lu\n", ctxt->expected);
 
-	buf[expected - 1] = expected - 1;
+	ctxt->buf[ctxt->expected - 1] = ctxt->expected - 1;
 
 	size_t nwritten;
 	ssize_t err;
-	size_t expected_bytes = expected * sizeof(uint32_t);
+	size_t expected_bytes = ctxt->expected * sizeof(uint32_t);
 	for (nwritten = 0; nwritten < expected_bytes; nwritten += err) {
-		err = send(fd, buf + nwritten, expected_bytes - nwritten, 0);
+		err = send(fd, ctxt->buf + nwritten, expected_bytes - nwritten, 0);
 		if (err == 0) {
 			fprintf(stderr, "Remote shut down\n");
 			goto fail;
@@ -119,49 +125,45 @@ do_write(int fd, short event, void *arg)
 		}
 	}
 
-	expected = ((expected + 1) % MAX_BUF_SIZE);
-	if (expected == 0) {
-		expected = 1;
+	ctxt->expected = ((ctxt->expected + 1) % MAX_BUF_SIZE);
+	if (ctxt->expected == 0) {
+		ctxt->expected = 1;
 	}
 
-	struct event *evt_read = malloc(sizeof(struct event));
-	if (!evt_read) {
-		fprintf(stderr, "malloc evt_read\n");
-		goto fail;
-	}
+	event_set(&ctxt->evt, fd, EV_READ, do_read, ctxt);
+	event_add(&ctxt->evt, &timeout_read);
 
-	event_set(evt_read, fd, EV_READ, do_read, evt_read);
-	event_add(evt_read, &timeout_read);
+	return;
 
 fail:
-	free(evt_write);
+	free(ctxt);
 }
 
 static void
 do_read(int fd, short event, void *arg)
 {
-	struct event *evt_read = arg;
+	struct context *ctxt = arg;
 
 	if (event == EV_TIMEOUT) {
 		fprintf(stderr, "Timeout read\n");
 		goto fail;
 	}
 
-	fprintf(stdout, "Read: %lu\n", expected);
+	fprintf(stdout, "Read: %lu\n", ctxt->expected);
 
-	memset(buf, 0, expected);
+	memset(ctxt->buf, 0, ctxt->expected);
 
 	size_t nread;
 	ssize_t err;
-	size_t expected_bytes = expected * sizeof(uint32_t);
+	size_t expected_bytes = ctxt->expected * sizeof(uint32_t);
 	for (nread = 0; nread < expected_bytes; nread += err) {
-		err = recv(fd, buf + nread, expected_bytes - nread, 0);
+		err = recv(fd, ctxt->buf + nread, expected_bytes - nread, 0);
 		if (err == 0) {
 			fprintf(stderr, "Remote shut down\n");
 			goto fail;
 		} else if (err < 0) {
 			if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
-				event_add(evt_read, &timeout_read);
+				event_add(&ctxt->evt, &timeout_read);
 				return;
 			}
 			perror("recv");
@@ -170,34 +172,30 @@ do_read(int fd, short event, void *arg)
 	}
 
 	uint32_t i;
-	for (i = 0; i < expected; i++) {
-		if (buf[i] != i) {
+	for (i = 0; i < ctxt->expected; i++) {
+		if (ctxt->buf[i] != i) {
 			fprintf(stderr, "Received incorrect data\n");
 
 			uint32_t j;
-			for (j = 0; j < expected; j++) {
-				fprintf(stderr, "buf[%u] == %u != %u\n", j, buf[j], j);
+			for (j = 0; j < ctxt->expected; j++) {
+				fprintf(stderr, "buf[%u] == %u != %u\n", j, ctxt->buf[j], j);
 			}
 			goto fail;
 		}
 	}
 
-	expected = ((expected + 1) % MAX_BUF_SIZE);
-	if (expected == 0) {
-		expected = 1;
+	ctxt->expected = ((ctxt->expected + 1) % MAX_BUF_SIZE);
+	if (ctxt->expected == 0) {
+		ctxt->expected = 1;
 	}
 
-	struct event *evt_write = malloc(sizeof(struct event));
-	if (!evt_write) {
-		fprintf(stderr, "malloc evt_write\n");
-		goto fail;
-	}
+	event_set(&ctxt->evt, fd, EV_WRITE, do_write, ctxt);
+	event_add(&ctxt->evt, &timeout_write);
 
-	event_set(evt_write, fd, EV_WRITE, do_write, evt_write);
-	event_add(evt_write, &timeout_write);
+	return;
 
 fail:
-	free(evt_read);
+	free(ctxt);
 }
 
 int
@@ -207,8 +205,6 @@ main(int argc, char *argv[])
 		usage(argv[0]);
 		exit(EXIT_FAILURE);
 	}
-
-	buf[expected - 1] = expected - 1;
 
 	event_init();
 
@@ -267,7 +263,7 @@ main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	event_set(evt_accepted, sockfd, EV_READ, do_accepted, evt_accepted);
+	event_set(evt_accepted, sockfd, EV_READ | EV_PERSIST, do_accepted, evt_accepted);
 	event_add(evt_accepted, &timeout_accepted);
 
 	event_dispatch();
